@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <xbar.title>Codex Usage</xbar.title>
-# <xbar.version>v1.0.0</xbar.version>
+# <xbar.version>v1.0.1</xbar.version>
 # <xbar.author>Contributors</xbar.author>
 # <xbar.desc>Remaining Codex quota for your configured accounts</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
@@ -22,15 +22,18 @@ import math
 import os
 from pathlib import Path
 import selectors
+import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 # Keep each live attempt short enough that xbar stays responsive, then retry a
 # separate app-server process once for temporary service/network failures.
 TIMEOUT_SECONDS = 12
 LIVE_ATTEMPTS = 2
+MAX_JSON_BYTES = 1024 * 1024
 # Retain the last identified reading for context, but always label its age and
 # keep that separate from the quota window's reset countdown.
 MAX_STALE_SECONDS = 7 * 24 * 60 * 60
@@ -56,6 +59,33 @@ class UsageError(RuntimeError):
 
 class IdentityError(UsageError):
     """The source app holds a different account than this slot expects."""
+
+
+def read_json(path):
+    """Read a bounded, regular, user-owned file without following a symlink."""
+    fd = os.open(Path(path).expanduser(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022):
+            raise OSError("Unsafe local file")
+        data = stream.read(MAX_JSON_BYTES + 1)
+        if len(data) > MAX_JSON_BYTES:
+            raise OSError("Local file too large")
+    return json.loads(data)
+
+
+def private_directory(path):
+    """Protect plugin-owned state without chmodding a symlink target."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid():
+            raise OSError("Unsafe state directory")
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
 
 
 def codex_binary():
@@ -98,7 +128,7 @@ def claims(token):
 def inspect(profile):
     """Read a source's sign-in without deciding which slot it belongs to."""
     try:
-        data = json.loads(Path(profile["path"]).expanduser().read_text())
+        data = read_json(profile["path"])
         source = profile["source"]
         values = data["tokens"] if source == "codex" else data["openai"]
         token = values["access_token"] if source == "codex" else values["access"]
@@ -127,7 +157,7 @@ def credential(profile):
     found = inspect(profile)
     if found["email"].casefold() != profile["email"].casefold():
         raise IdentityError(
-            f"{profile.get('app', 'Source app')} is signed in as {found['email']}, not this account")
+            f"{profile.get('app', 'Source app')} is signed in to a different account")
     return found["auth"]
 
 
@@ -153,6 +183,8 @@ class AppServer:
         req_id = self.request_id
         self.send({"id": req_id, "method": method, "params": params})
         while True:
+            if time.monotonic() >= self.deadline:
+                raise UsageError("Usage check timed out; retry")
             while b"\n" not in self.buffer:
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0 or not self.selector.select(remaining):
@@ -161,11 +193,15 @@ class AppServer:
                 if not chunk:
                     raise UsageError("Codex usage service stopped; retry")
                 self.buffer += chunk
+                if len(self.buffer) > MAX_JSON_BYTES:
+                    raise UsageError("Usage response too large; check stopped")
             line, self.buffer = self.buffer.split(b"\n", 1)
             try:
                 message = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(message, dict):
+                raise UsageError("Usage response unreadable; check stopped")
             if "method" in message:
                 if "id" in message:
                     # Host apps own renewal. Never rotate their refresh tokens here.
@@ -251,7 +287,7 @@ def legacy_key(profile):
 
 def load_cache():
     try:
-        data = json.loads(CACHE.read_text())
+        data = read_json(CACHE)
         return data["accounts"] if data.get("version") == 1 and isinstance(data["accounts"], dict) else {}
     except (OSError, ValueError, KeyError, TypeError):
         return {}
@@ -316,7 +352,7 @@ def save_cache(accounts):
                 records[key] = {"savedAt": saved, "result": display_result(cached["result"])}
     temporary = None
     try:
-        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        private_directory(CACHE.parent)
         fd, temporary = tempfile.mkstemp(prefix="." + CACHE.name + ".", dir=CACHE.parent)
         with os.fdopen(fd, "w") as stream:
             json.dump({"version": 1, "accounts": records}, stream, separators=(",", ":"))
@@ -363,7 +399,10 @@ def stale_label(seconds):
 
 
 def clean(value):
-    return " ".join(str(value).replace("|", "∣").split())
+    # Dynamic text cannot add menu parameters, ANSI escapes or bidi overrides.
+    text = "".join(" " if unicodedata.category(c).startswith("C") else c
+                   for c in str(value))
+    return " ".join(text.replace("|", "∣").split())
 
 
 def remaining(window):
@@ -494,7 +533,8 @@ def render(accounts):
         result = account.get("result", {})
         print("---")
         print(f"{clean(profile['label'])} | size=14")
-        print(f"{clean(profile['email'])} | size=11 color=#8E8E93")
+        if profile.get("showEmail", False):
+            print(f"{clean(profile['email'])} | size=11 color=#8E8E93")
         if account.get("error"):
             print(f"{clean(account['error'])} | color=#FF9F0A")
         if account.get("stale_seconds") is not None:
@@ -531,7 +571,7 @@ def render(accounts):
 
 def load_profiles():
     try:
-        profiles = json.loads(CONFIG.read_text())["accounts"]
+        profiles = read_json(CONFIG)["accounts"]
         if not isinstance(profiles, list) or not profiles:
             raise ValueError()
         for p in profiles:
@@ -540,6 +580,8 @@ def load_profiles():
             for key in ("path", "email", "label", "short", "app"):
                 if not isinstance(p[key], str) or not p[key].strip():
                     raise ValueError()
+            if not isinstance(p.get("showEmail", False), bool):
+                raise ValueError()
         if len({p["email"].casefold() for p in profiles}) != len(profiles):
             raise ValueError()
         return profiles
@@ -562,10 +604,9 @@ def sources(profiles):
 
 
 def unheld(profile, found):
-    """Explain a slot no app is signed in to, naming where its apps went."""
-    elsewhere = sorted({s["email"] for s in found if s.get("email")})
-    if elsewhere:
-        return f"No app signed in to this account ({', '.join(elsewhere)} instead)"
+    """Explain a missing account without exposing other source identities."""
+    if any(s.get("email") for s in found):
+        return "No app signed in to this account; check the source app's sign-in"
     return next((s["error"] for s in found if s.get("error")), "Sign-in unavailable")
 
 

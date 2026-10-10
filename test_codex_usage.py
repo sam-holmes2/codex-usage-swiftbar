@@ -327,7 +327,7 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertIn('P90%', output.getvalue())
         self.assertIn('No app signed in to this account', output.getvalue())
-        self.assertIn('shared@example.test instead', output.getvalue())
+        self.assertNotIn('shared@example.test', output.getvalue())
 
     def test_compact_reset_countdown(self):
         with patch.object(w.time, 'time', return_value=1000000):
@@ -357,7 +357,7 @@ class WidgetTests(unittest.TestCase):
             path.write_text(initial)
             self.assertEqual(w.credential(p)['chatgptAccountId'], 'work')
             self.assertEqual(path.read_text(), initial)
-            with self.assertRaisesRegex(w.UsageError, 'signed in as work@example.test'):
+            with self.assertRaisesRegex(w.UsageError, 'different account'):
                 w.credential(dict(p, email='personal@example.test'))
             path.write_text(json.dumps({'openai': {'access': token(p['email'], 1), 'accountId': 'work'}}))
             with self.assertRaisesRegex(w.UsageError, 'expired'):

@@ -28,7 +28,7 @@ class InstallationTests(unittest.TestCase):
                     plugin, config = installer.install(Path(folder) / 'plugins', path)
             inspect.assert_not_called()
             self.assertEqual(plugin.read_bytes(), installer.SOURCE.read_bytes())
-            self.assertEqual(config.read_bytes(), path.read_bytes())
+            self.assertEqual(json.loads(config.read_text()), json.loads(path.read_text()))
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
             self.assertEqual(plugin.stat().st_mode & 0o777, 0o755)
             with patch.object(installer.widget.time, 'time', return_value=1000):
@@ -69,7 +69,7 @@ class InstallationTests(unittest.TestCase):
                 installer.install(watched)
                 installer.install(watched)
             inspect.assert_not_called()
-            self.assertEqual(config.read_bytes(), data)
+            self.assertEqual(json.loads(config.read_text()), json.loads(data))
             self.assertEqual(other.read_text(), 'unrelated')
             backups = list((config.parent / 'backups').iterdir())
             self.assertEqual(len(backups), 1)

@@ -56,11 +56,15 @@ def plugin_directory():
 
 def install(plugin_dir, accounts=None):
     config = widget.CONFIG
+    # Never store private state inside a folder SwiftBar will scan as plugins.
+    watched = plugin_dir.resolve()
+    state = config.parent.resolve()
+    if state == watched or watched in state.parents:
+        raise widget.UsageError('Plugin folder must be separate from the private configuration folder')
     if accounts:
         if config.exists():
             raise widget.UsageError('Configuration already exists; edit it locally to change accounts')
-        validate(accounts)
-        data = accounts.read_bytes()
+        data = (json.dumps({'accounts': validate(accounts)}, indent=2) + '\n').encode()
     elif config.exists():
         validate(config)
         data = None
@@ -71,19 +75,19 @@ def install(plugin_dir, accounts=None):
                        label='Codex', short='C', app='Codex')
         profile['email'] = widget.inspect(profile)['email']
         data = (json.dumps({'accounts': [profile]}, indent=2) + '\n').encode()
+    widget.private_directory(config.parent)
     if data is not None:
         atomic_write(config, data, 0o600)
     else:
-        config.chmod(0o600)
+        # Replace the validated mapping atomically, without chmod following a link.
+        data = (json.dumps({'accounts': validate(config)}, indent=2) + '\n').encode()
+        atomic_write(config, data, 0o600)
 
     plugin = plugin_dir / SOURCE.name
     if plugin.exists() and plugin.read_bytes() != SOURCE.read_bytes():
         # Backups must be outside the folder SwiftBar recursively executes.
         backup_dir = config.parent / 'backups'
-        watched = plugin_dir.resolve()
-        if backup_dir.resolve() == watched or watched in backup_dir.resolve().parents:
-            raise widget.UsageError('Plugin folder must be separate from the private configuration folder')
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        widget.private_directory(backup_dir)
         stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         shutil.copy2(plugin, backup_dir / (plugin.name + '.' + stamp + '.disabled'))
     atomic_write(plugin, SOURCE.read_bytes(), 0o755)
