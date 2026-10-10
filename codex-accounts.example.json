@@ -1,0 +1,20 @@
+{
+  "accounts": [
+    {
+      "source": "codex",
+      "path": "~/.codex/auth.json",
+      "label": "Personal",
+      "short": "P",
+      "app": "Codex",
+      "email": "personal@example.test"
+    },
+    {
+      "source": "opencode",
+      "path": "~/.local/share/opencode/auth.json",
+      "label": "Second account",
+      "short": "S",
+      "app": "OpenCode",
+      "email": "second@example.test"
+    }
+  ]
+}
