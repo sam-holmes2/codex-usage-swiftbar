@@ -1,6 +1,6 @@
 # Codex Usage for SwiftBar
 
-Remaining Codex quota and reset times in your macOS menu bar, for one or more accounts.
+Track **multiple Codex subscriptions side by side** in your macOS menu bar, each with its own remaining quota, colour and reset countdown. Works with a single subscription too.
 
 ```text
 P23% 5d18h │ W25% 4d18h ~1d
